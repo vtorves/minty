@@ -101,8 +101,8 @@ async function getNFT(tokenId, options) {
     const nft = await minty.getNFT(tokenId, {fetchCreationInfo})
 
     const output = [
-        ['Token ID:', chalk.green(nft.tokenId)],
-        ['Owner Address:', chalk.yellow(nft.ownerAddress)],
+         ['Token ID:', chalk.green(nft.tokenId)],
+         ['Owner Address:', chalk.yellow(nft.ownerAddress)],
     ]
     if (nft.creationInfo) {
         output.push(['Creator Address:', chalk.yellow(nft.creationInfo.creatorAddress)])
@@ -112,7 +112,7 @@ async function getNFT(tokenId, options) {
     output.push(['Metadata Gateway URL:', chalk.blue(nft.metadataGatewayURL)])
     output.push(['Asset Address:', chalk.blue(nft.assetURI)])
     output.push(['Asset Gateway URL:', chalk.blue(nft.assetGatewayURL)])
-    alignOutput(output)
+     alignOutput(output)
 
     console.log('NFT Metadata:')
     console.log(colorize(JSON.stringify(nft.metadata), colorizeOptions))

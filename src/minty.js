@@ -9,8 +9,6 @@ const uint8ArrayToString = require('uint8arrays/to-string')
 const {BigNumber} = require('ethers')
 
 
-const { loadDeploymentInfo } = require('./deploy')
-
 // The getconfig package loads configuration from files located in the the `config` directory.
 // See https://www.npmjs.com/package/getconfig for info on how to override the default config for
 // different environments (e.g. testnet, mainnet, staging, production, etc).
@@ -44,7 +42,6 @@ class Minty {
     constructor() {
         this.ipfs = null
         this.contract = null
-        this.deployInfo = null
         this._initialized = false
     }
 
@@ -52,17 +49,6 @@ class Minty {
         if (this._initialized) {
             return
         }
-        this.hardhat = require('hardhat')
-
-        // The Minty object expects that the contract has already been deployed, with
-        // details written to a deployment info file. The default location is `./minty-deployment.json`,
-        // in the config.
-        this.deployInfo = await loadDeploymentInfo()
-
-        // connect to the smart contract using the address and ABI from the deploy info
-        const {abi, address} = this.deployInfo.contract
-        this.contract = await this.hardhat.ethers.getContractAt(abi, address)
-
         // create a local IPFS node
         this.ipfs = ipfsClient(config.ipfsApiUrl)
 
@@ -85,8 +71,6 @@ class Minty {
      * If missing, the default signing address will be used.
      * 
      * @typedef {object} CreateNFTResult
-     * @property {string} tokenId - the unique ID of the new token
-     * @property {string} ownerAddress - the ethereum address of the new token's owner
      * @property {object} metadata - the JSON metadata stored in IPFS and referenced by the token's metadata URI
      * @property {string} metadataURI - an ipfs:// URI for the NFT metadata
      * @property {string} metadataGatewayURL - an HTTP gateway URL for the NFT metadata
@@ -116,19 +100,9 @@ class Minty {
         const { cid: metadataCid } = await this.ipfs.add({ path: '/nft/metadata.json', content: JSON.stringify(metadata)}, ipfsAddOptions)
         const metadataURI = ensureIpfsUriPrefix(metadataCid) + '/metadata.json'
 
-        // get the address of the token owner from options, or use the default signing address if no owner is given
-        let ownerAddress = options.owner
-        if (!ownerAddress) {
-            ownerAddress = await this.defaultOwnerAddress()
-        }
-
-        // mint a new token referencing the metadata URI
-        const tokenId = await this.mintToken(ownerAddress, metadataURI)
 
         // format and return the results
         return {
-            tokenId,
-            ownerAddress,
             metadata,
             assetURI,
             metadataURI,
@@ -182,15 +156,12 @@ class Minty {
      * To include info about when the token was created and by whom, set `opts.fetchCreationInfo` to true.
      * To include the full asset data (base64 encoded), set `opts.fetchAsset` to true.
      *
-     * @param {string} tokenId
      * @param {object} opts
      * @param {?boolean} opts.fetchAsset - if true, asset data will be fetched from IPFS and returned in assetData (base64 encoded)
      * @param {?boolean} opts.fetchCreationInfo - if true, fetch historical info (creator address and block number)
      * 
      * 
      * @typedef {object} NFTInfo
-     * @property {string} tokenId
-     * @property {string} ownerAddress
      * @property {object} metadata
      * @property {string} metadataURI
      * @property {string} metadataGatewayURI
@@ -202,11 +173,10 @@ class Minty {
      * @property {number} creationInfo.blockNumber
      * @returns {Promise<NFTInfo>}
      */
-    async getNFT(tokenId, opts) {
-        const {metadata, metadataURI} = await this.getNFTMetadata(tokenId)
-        const ownerAddress = await this.getTokenOwner(tokenId)
+    async getNFT(metadataURI, opts) {
+        const metadata = await this.getIPFSJSON(metadataURI)
         const metadataGatewayURL = makeGatewayURL(metadataURI)
-        const nft = {tokenId, metadata, metadataURI, metadataGatewayURL, ownerAddress}
+        const nft = { metadataURI, metadataGatewayURL}
 
         const {fetchAsset, fetchCreationInfo} = (opts || {})
         if (metadata.image) {
@@ -217,121 +187,16 @@ class Minty {
             }
         }
 
-        if (fetchCreationInfo) {
-            nft.creationInfo = await this.getCreationInfo(tokenId)
-        }
+        // if (fetchCreationInfo) {
+        //     nft.creationInfo = await this.getCreationInfo(tokenId)
+        // }
         return nft
-    }
-
-    /**
-     * Fetch the NFT metadata for a given token id.
-     * 
-     * @param tokenId - the id of an existing token
-     * @returns {Promise<{metadata: object, metadataURI: string}>} - resolves to an object containing the metadata and
-     * metadata URI. Fails if the token does not exist, or if fetching the data fails.
-     */
-    async getNFTMetadata(tokenId) {
-        const metadataURI = await this.contract.tokenURI(tokenId)
-        const metadata = await this.getIPFSJSON(metadataURI)
-
-        return {metadata, metadataURI}
-    }
-
-    //////////////////////////////////////////////
-    // --------- Smart contract interactions
-    //////////////////////////////////////////////
-
-    /**
-     * Create a new NFT token that references the given metadata CID, owned by the given address.
-     * 
-     * @param {string} ownerAddress - the ethereum address that should own the new token
-     * @param {string} metadataURI - IPFS URI for the NFT metadata that should be associated with this token
-     * @returns {Promise<string>} - the ID of the new token
-     */
-    async mintToken(ownerAddress, metadataURI) {
-        // the smart contract adds an ipfs:// prefix to all URIs, so make sure it doesn't get added twice
-        metadataURI = stripIpfsUriPrefix(metadataURI)
-
-        // Call the mintToken method to issue a new token to the given address
-        // This returns a transaction object, but the transaction hasn't been confirmed
-        // yet, so it doesn't have our token id.
-        const tx = await this.contract.mintToken(ownerAddress, metadataURI)
-
-        // The OpenZeppelin base ERC721 contract emits a Transfer event when a token is issued.
-        // tx.wait() will wait until a block containing our transaction has been mined and confirmed.
-        // The transaction receipt contains events emitted while processing the transaction.
-        const receipt = await tx.wait()
-        for (const event of receipt.events) {
-            if (event.event !== 'Transfer') {
-                console.log('ignoring unknown event type ', event.event)
-                continue
-            }
-            return event.args.tokenId.toString()
-        }
-
-        throw new Error('unable to get token id')
-    }
-
-    async transferToken(tokenId, toAddress) {
-        const fromAddress = await this.getTokenOwner(tokenId)
-
-        // because the base ERC721 contract has two overloaded versions of the safeTranferFrom function,
-        // we need to refer to it by its fully qualified name.
-        const tranferFn = this.contract['safeTransferFrom(address,address,uint256)']
-        const tx = await tranferFn(fromAddress, toAddress, tokenId)
-
-        // wait for the transaction to be finalized
-        await tx.wait()
-    }
-
-    /**
-     * @returns {Promise<string>} - the default signing address that should own new tokens, if no owner was specified.
-     */
-    async defaultOwnerAddress() {
-        const signers = await this.hardhat.ethers.getSigners()
-        return signers[0].address
-    }
-
-    /**
-     * Get the address that owns the given token id.
-     * 
-     * @param {string} tokenId - the id of an existing token
-     * @returns {Promise<string>} - the ethereum address of the token owner. Fails if no token with the given id exists.
-     */
-    async getTokenOwner(tokenId) {
-        return this.contract.ownerOf(tokenId)
-    }
-
-    /**
-     * Get historical information about the token.
-     * 
-     * @param {string} tokenId - the id of an existing token
-     * 
-     * @typedef {object} NFTCreationInfo
-     * @property {number} blockNumber - the block height at which the token was minted
-     * @property {string} creatorAddress - the ethereum address of the token's initial owner
-     * 
-     * @returns {Promise<NFTCreationInfo>}
-     */
-    async getCreationInfo(tokenId) {
-        const filter = await this.contract.filters.Transfer(
-            null,
-            null,
-            BigNumber.from(tokenId)
-        )
-
-        const logs = await this.contract.queryFilter(filter)
-        const blockNumber = logs[0].blockNumber
-        const creatorAddress = logs[0].args.to
-        return {
-            blockNumber,
-            creatorAddress,
-        }
     }
 
     //////////////////////////////////////////////
     // --------- IPFS helpers
     //////////////////////////////////////////////
+    
 
     /**
      * Get the full contents of the IPFS object identified by the given CID or URI.
@@ -388,14 +253,14 @@ class Minty {
      * @returns {Promise<{assetURI: string, metadataURI: string}>} - the IPFS asset and metadata uris that were pinned.
      * Fails if no token with the given id exists, or if pinning fails.
      */
-    async pinTokenData(tokenId) {
-        const {metadata, metadataURI} = await this.getNFTMetadata(tokenId)
+    async pinTokenData(metadataURI) {
+        const metadata = await this.getIPFSJSON(metadataURI)
         const {image: assetURI} = metadata
         
-        console.log(`Pinning asset data (${assetURI}) for token id ${tokenId}....`)
+        console.log('metadata pin: ', metadata)
+        console.log(`Pinning asset data (${assetURI}) for token id ${metadataURI}....`)
         await this.pin(assetURI)
 
-        console.log(`Pinning metadata (${metadataURI}) for token id ${tokenId}...`)
         await this.pin(metadataURI)
 
         return {assetURI, metadataURI}
@@ -467,6 +332,7 @@ class Minty {
 
         // add the service to IPFS
         const { name, endpoint, key } = config.pinningService
+
         if (!name) {
             throw new Error('No name configured for pinning service')
         }
